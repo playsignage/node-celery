@@ -9,6 +9,7 @@
   "dependencies": {
     "amqp": "*",
     "redis": "*",
+    "redis-sentinel": "^0.3.3",
     "uuid": "^3.0.0"
   },
   "repository": {
