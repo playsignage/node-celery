@@ -3,14 +3,13 @@ var url = require('url'),
     amqp = require('amqp'),
     redis = require('redis'),
     events = require('events'),
-    sentinel = require('redis-sentinel'),
     uuid = require('uuid');
 
 var createMessage = require('./protocol').createMessage;
 
 var debug = process.env.NODE_CELERY_DEBUG === '1' ? console.info : function() {};
 
-var supportedProtocols = ['amqp', 'amqps', 'redis', 'redis-sentinel'];
+var supportedProtocols = ['amqp', 'amqps', 'redis'];
 function getProtocol(kind, options) {
     const protocol = url.parse(options.url).protocol.slice(0, -1);
     if (protocol === 'amqps') {
@@ -182,132 +181,6 @@ function RedisBackend(conf) {
 }
 util.inherits(RedisBackend, events.EventEmitter);
 
-function RedisSentinelBroker(conf) {
-    var self = this;
-
-    if (conf.BROKER_OPTIONS.createClient) {
-        self.redis = conf.BROKER_OPTIONS.createClient('broker');
-
-        self.disconnect = function () {};
-    } else {
-      // E.g. redis-sentinel://127.0.0.1:26379/0;redis-sentinel://127.0.0.1:26379/0
-        var sentinels = conf.BROKER_OPTIONS.url.split(';').map(function (t) {
-          var parsed = url.parse(t);
-          return { host: parsed.hostname, port: parsed.port };
-        });
-
-        self.redis = sentinel.createClient(sentinels, 'mymaster', {});
-
-        self.disconnect = function() {
-            self.redis.quit();
-        };
-    }
-
-    self.redis.on('connect', function() {
-        self.emit('ready');
-    });
-
-    self.redis.on('error', function(err) {
-        self.emit('error', err);
-    });
-
-    self.redis.on('end', function() {
-        self.emit('end');
-    });
-
-    self.publish = function(queue, message, options, callback, id) {
-        var payload = {
-            body: new Buffer(message).toString('base64'),
-            headers: {},
-            'content-type': options.contentType,
-            'content-encoding': options.contentEncoding,
-            properties: {
-                body_encoding: 'base64',
-                correlation_id: id,
-                delivery_info: {
-                    exchange: queue,
-                    priority: 0,
-                    routing_key: queue
-                },
-                delivery_mode: 2, // No idea what this means
-                delivery_tag: uuid.v4(),
-                reply_to: uuid.v4()
-            }
-        };
-        self.redis.lpush(queue, JSON.stringify(payload));
-    };
-
-    return self;
-}
-util.inherits(RedisSentinelBroker, events.EventEmitter);
-
-function RedisSentinelBackend(conf) {
-    var self = this;
-
-    if (conf.RESULT_BACKEND_OPTIONS.createClient) {
-        self.redis = conf.RESULT_BACKEND_OPTIONS.createClient('backend');
-        self.redis_ex = conf.RESULT_BACKEND_OPTIONS.createClient('backend_ex');
-
-        self.disconnect = function () {};
-    } else {
-      // E.g. redis-sentinel://127.0.0.1:26379/0;redis-sentinel://127.0.0.1:26379/0
-        var sentinels = conf.BROKER_OPTIONS.url.split(';').map(function (t) {
-          var parsed = url.parse(t);
-          return { host: parsed.hostname, port: parsed.port };
-        });
-
-        self.redis = sentinel.createClient(sentinels, 'mymaster', {});
-        self.redis_ex = sentinel.createClient(sentinels, 'mymaster', {});
-
-        self.disconnect = function() {
-            self.redis_ex.quit();
-            self.redis.quit();
-        };
-    }
-
-    for (const client of [self.redis, self.redis_ex]) {
-        client.on('error', function(err) {
-            self.emit('error', err);
-        });
-    }
-
-    // store results to emit event when ready
-    self.results = {};
-
-    // results prefix
-    var key_prefix = 'celery-task-meta-';
-
-    self.redis.on('connect', function() {
-        debug('Backend connected...');
-        // on redis result..
-        self.redis.on('pmessage', function(pattern, channel, data) {
-            self.redis_ex.expire(channel, conf.TASK_RESULT_EXPIRES / 1000);
-            var message = JSON.parse(data);
-            var taskid = channel.slice(key_prefix.length);
-            if (self.results.hasOwnProperty(taskid)) {
-                var res = self.results[taskid];
-                res.result = message;
-                res.emit('ready', res.result);
-                delete self.results[taskid];
-            } else {
-                // in case of incoming messages where we don't have the result object
-                self.emit('message', message);
-            }
-        });
-        // subscribe to redis results
-        self.redis.psubscribe(key_prefix + '*', () => {
-            self.emit('ready');
-        });
-    });
-
-    self.get = function(taskid, cb) {
-        self.redis_ex.get(key_prefix + taskid, cb);
-    }
-
-    return self;
-}
-util.inherits(RedisSentinelBackend, events.EventEmitter);
-
 function Client(conf) {
     var self = this;
     self.ready = false;
@@ -317,11 +190,6 @@ function Client(conf) {
     // backend
     if (self.conf.backend_type === 'redis') {
         self.backend = new RedisBackend(self.conf);
-        self.backend.on('message', function(msg) {
-            self.emit('message', msg);
-        });
-    } else if (self.conf.backend_type === 'redis-sentinel') {
-        self.backend = new RedisSentinelBackend(self.conf);
         self.backend.on('message', function(msg) {
             self.emit('message', msg);
         });
@@ -341,8 +209,6 @@ function Client(conf) {
 
         if (self.conf.broker_type === 'redis') {
             self.broker = new RedisBroker(self.conf);
-        } else if (self.conf.broker_type === 'redis-sentinel') {
-            self.broker = new RedisSentinelBroker(self.conf);
         } else if (self.conf.broker_type === 'amqp') {
             self.broker = amqp.createConnection(self.conf.BROKER_OPTIONS, {
                 defaultExchangeName: self.conf.DEFAULT_EXCHANGE
