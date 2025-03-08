@@ -9,7 +9,7 @@ var createMessage = require('./protocol').createMessage;
 
 var debug = process.env.NODE_CELERY_DEBUG === '1' ? console.info : function() {};
 
-var supportedProtocols = ['amqp', 'amqps', 'redis'];
+var supportedProtocols = ['amqp', 'amqps', 'redis', 'rediss'];
 function getProtocol(kind, options) {
     const protocol = url.parse(options.url).protocol.slice(0, -1);
     if (protocol === 'amqps') {
@@ -188,7 +188,7 @@ function Client(conf) {
     self.conf = new Configuration(conf);
 
     // backend
-    if (self.conf.backend_type === 'redis') {
+    if (['redis', 'rediss'].includes(self.conf.backend_type)) {
         self.backend = new RedisBackend(self.conf);
         self.backend.on('message', function(msg) {
             self.emit('message', msg);
@@ -207,7 +207,7 @@ function Client(conf) {
     self.backend.on('ready', function() {
         debug('Connecting to broker...');
 
-        if (self.conf.broker_type === 'redis') {
+        if (['redis', 'rediss'].includes(self.conf.broker_type)) {
             self.broker = new RedisBroker(self.conf);
         } else if (self.conf.broker_type === 'amqp') {
             self.broker = amqp.createConnection(self.conf.BROKER_OPTIONS, {
@@ -284,7 +284,7 @@ function Task(client, name, options, exchange) {
 
         var result = new Result(id, self.client);
 
-        if (client.conf.backend_type === 'redis') {
+        if (['redis', 'rediss'].includes(client.conf.backend_type)) {
             client.backend.results[result.taskid] = result;
         }
 
